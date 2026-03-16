@@ -49,6 +49,7 @@ builder.Services.AddDbContext<ChargingDbContext>(options =>
 
 builder.Services.AddSingleton<IEventBus, RabbitMqEventBus>();
 builder.Services.AddHostedService<DatabaseInitializerHostedService>();
+builder.Services.AddHostedService<ReservationExpiryPublisher>();
 builder.Services.AddHostedService<ChargingWorkflowConsumer>();
 builder.Services.Configure<HostOptions>(options =>
 {

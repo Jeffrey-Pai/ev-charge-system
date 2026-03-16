@@ -231,6 +231,70 @@ public class ChargingWorkflowConsumer(
 
                     break;
                 }
+                case "charging.reservation.expire.requested":
+                {
+                    var payload = JsonSerializer.Deserialize<ReservationExpireRequestedEvent>(bodyText);
+                    if (payload is null) return false;
+
+                    var reservation = await db.ChargingReservations
+                        .Include(x => x.Charger)
+                        .FirstOrDefaultAsync(x => x.Id == payload.ReservationId, cancellationToken);
+
+                    if (reservation is null || reservation.Charger is null)
+                    {
+                        logger.LogWarning("Reservation {ReservationId} not found for expire.requested", payload.ReservationId);
+                        return true;
+                    }
+
+                    if (reservation.Status is ReservationStatus.Cancelled or ReservationStatus.Completed or ReservationStatus.Expired)
+                    {
+                        return true;
+                    }
+
+                    if (reservation.Status == ReservationStatus.InUse)
+                    {
+                        logger.LogWarning("Ignoring expire.requested for reservation {ReservationId} because it is in use", reservation.Id);
+                        return true;
+                    }
+
+                    if (reservation.EndAtUtc > DateTime.UtcNow)
+                    {
+                        logger.LogWarning("Ignoring expire.requested for reservation {ReservationId} because it has not passed end time", reservation.Id);
+                        return true;
+                    }
+
+                    reservation.Status = ReservationStatus.Expired;
+
+                    var hasFutureConfirmedReservations = await db.ChargingReservations.AnyAsync(x =>
+                        x.ChargerId == reservation.ChargerId &&
+                        x.Id != reservation.Id &&
+                        x.Status == ReservationStatus.Confirmed,
+                        cancellationToken);
+
+                    var hasInProgressSessions = await db.ChargingSessions.AnyAsync(x =>
+                        x.ChargerId == reservation.ChargerId &&
+                        (x.Status == SessionStatus.PendingStart || x.Status == SessionStatus.Active || x.Status == SessionStatus.PendingStop),
+                        cancellationToken);
+
+                    if (!hasFutureConfirmedReservations && !hasInProgressSessions && reservation.Charger.Status == ChargerStatus.Reserved)
+                    {
+                        reservation.Charger.Status = ChargerStatus.Available;
+                        reservation.Charger.UpdatedAtUtc = DateTime.UtcNow;
+                    }
+
+                    await db.SaveChangesAsync(cancellationToken);
+
+                    await eventBus.PublishAsync(
+                        "charging.reservation.expired",
+                        new ReservationExpiredEvent(
+                            reservation.Id,
+                            reservation.ChargerId,
+                            reservation.UserAccountId,
+                            DateTime.UtcNow),
+                        cancellationToken);
+
+                    break;
+                }
             }
 
             return true;
@@ -265,6 +329,7 @@ public class ChargingWorkflowConsumer(
                 _channel.QueueBind(_options.Queue, _options.Exchange, "charging.start.requested");
                 _channel.QueueBind(_options.Queue, _options.Exchange, "charging.stop.requested");
                 _channel.QueueBind(_options.Queue, _options.Exchange, "charging.reservation.created");
+                _channel.QueueBind(_options.Queue, _options.Exchange, "charging.reservation.expire.requested");
                 return;
             }
             catch (Exception ex)

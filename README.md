@@ -29,7 +29,7 @@
 ### 主要服務
 
 - `api`: `http://localhost:8080`
-- `sqlserver`: `localhost:1433`
+- `sqlserver`: `localhost:11433`
 - `rabbitmq`: `localhost:5673`（容器內仍是 `5672`）
 - RabbitMQ 管理頁: `http://localhost:15673` (`guest/guest`)
 
@@ -88,6 +88,93 @@ docker compose logs sqlserver --tail 200
 
 - `http://localhost:8080/swagger`
 - `http://localhost:8080/`（會自動導向 Swagger，方便 debug）
+
+### 4.1 怎麼看 MSSQL 資料庫內的資料
+
+本專案的 SQL Server 設定（來自 `docker-compose.yml`）：
+
+- Host: `localhost`
+- Port: `11433`
+- Database: `EvChargeDb`
+- User: `sa`
+- Password: `Your_password123`
+- Container: `evcharge-sqlserver`
+
+先確認資料庫容器有啟動：
+
+```bash
+docker compose ps
+```
+
+在 PowerShell 直接查詢（不用進 `/bin/bash`）：
+
+```bash
+docker exec evcharge-sqlserver /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "Your_password123" -d EvChargeDb -Q "SELECT TOP 10 * FROM Chargers"
+```
+
+如果你的容器沒有 `mssql-tools18`，改用：
+
+```bash
+docker exec evcharge-sqlserver /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "Your_password123" -d EvChargeDb -Q "SELECT TOP 10 * FROM Chargers"
+```
+
+你也可以先連進 `sqlcmd` 再手動查詢：
+
+```bash
+docker exec -it evcharge-sqlserver /opt/mssql-tools18/bin/sqlcmd -C -S 127.0.0.1,1433 -U sa -P "Your_password123" -d EvChargeDb
+```
+
+連進去後會看到 `1>` 提示符，輸入 SQL 後用 `GO` 執行，例如：
+
+```sql
+SELECT TOP 20 * FROM UserAccounts ORDER BY Id DESC;
+GO
+```
+
+離開 `sqlcmd`：
+
+```sql
+QUIT
+```
+
+常用查詢範例：
+
+```sql
+-- 列出資料表
+SELECT TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_TYPE = 'BASE TABLE';
+
+-- 看充電樁
+SELECT TOP 20 * FROM Chargers ORDER BY Id DESC;
+
+-- 看使用者
+SELECT TOP 20 * FROM UserAccounts ORDER BY Id DESC;
+
+-- 看預約
+SELECT TOP 20 * FROM ChargingReservations ORDER BY Id DESC;
+
+-- 看充電會話
+SELECT TOP 20 * FROM ChargingSessions ORDER BY Id DESC;
+```
+
+如果你想用 GUI，看資料會更直覺：
+
+- SSMS 或 Azure Data Studio 連線到 `localhost,11433`
+- 帳號 `sa` / 密碼 `Your_password123`
+- 展開 `Databases > EvChargeDb > Tables` 後即可直接查資料
+
+若 SSMS 登不進去，請檢查：
+
+1. Server name 請填 `localhost,11433`（不要只填 `localhost`）。
+2. Authentication 選 `SQL Server Authentication`，Login=`sa`。
+3. 在 SSMS 連線視窗按 `Options >>`：
+  - Encrypt 設為 `Optional`（或 `Mandatory` 也可）。
+  - 勾選 `Trust server certificate`。
+4. 先確認 Docker 映射正常：`docker ps` 要看到 `0.0.0.0:11433->1433/tcp`。
+5. 若你改過 `docker-compose.yml` 的 SA 密碼，需刪除舊 volume 才會套用新密碼：
+  `docker compose down -v` 後再 `docker compose up -d --build`。
+6. 如果仍是 18456，先用上面的 `docker exec ... sqlcmd` 驗證 `sa` 密碼是否正確；若正確但 SSMS 仍失敗，請改測 `127.0.0.1,11433`（不要用 `localhost`）。
 
 ## 5. API 使用流程
 
@@ -166,6 +253,11 @@ docker compose logs sqlserver --tail 200
 - `charging.stop.requested`
 - `charging.stopped`
 - `charging.reservation.created`
+- `charging.reservation.confirmed`
+- `charging.reservation.expire.requested`
+- `charging.reservation.expired`
+- `charging.reservation.in_use`
+- `charging.reservation.completed`
 
 ### 建議的充電樁流程編排
 
@@ -173,6 +265,8 @@ docker compose logs sqlserver --tail 200
 2. Workflow Consumer 收到事件，更新 DB（session=`Active`, charger=`Charging`），再發出 `charging.started`
 3. API 收到 `stop` 請求，寫 DB（session=`PendingStop`）後發出 `charging.stop.requested`
 4. Workflow Consumer 收到事件，更新 DB（session=`Completed`, charger=`Available`），再發出 `charging.stopped`
+5. API 建立預約後發出 `charging.reservation.created`，Workflow Consumer 轉成 `charging.reservation.confirmed`
+6. 背景服務定期掃描過期預約，發出 `charging.reservation.expire.requested`，Workflow Consumer 將預約標記 `Expired` 並在可釋放時把充電樁狀態改回 `Available`
 
 ## 7. 可擴充的 MQ 事件建議
 
